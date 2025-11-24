@@ -1,12 +1,10 @@
 (function(){
   const $ = (sel, el=document)=> el.querySelector(sel);
   
-  // Configurações
   const config = {
     nodeWidth: 180, nodeHeight: 38,
-    levelSpacing: 240, nodeSpacing: 50,
-    duration: 500,
-    lineStyle: 'curve' 
+    levelSpacing: 220, nodeSpacing: 50,
+    duration: 500, lineStyle: 'curve' 
   };
 
   const graph = d3.select('#graph');
@@ -21,9 +19,10 @@
   };
 
   const iconMap = {
-    'js': 'javascript', 'ts': 'javascript', 'html': 'html', 'css': 'css',
+    'xlsx': 'table_view', 'xls': 'table_view', 'csv': 'table_rows',
+    'js': 'javascript', 'html': 'html', 'css': 'css',
     'json': 'data_object', 'py': 'terminal', 'png': 'image', 'jpg': 'image', 
-    'md': 'markdown', 'default': 'draft'
+    'pdf': 'picture_as_pdf', 'zip': 'folder_zip', 'default': 'draft'
   };
 
   // --- ZOOM ---
@@ -39,7 +38,7 @@
   
   graph.call(zoom).on("dblclick.zoom", null);
 
-  // --- CORE ---
+  // --- CORE LOGIC ---
   function createNode(name, type, parent = null, meta = {}) {
     state.lastId++;
     return {
@@ -57,11 +56,10 @@
     nodes.forEach(d => { d.y = d.depth * config.levelSpacing; });
     const links = root.links();
 
-    // Render Nós
+    // RENDER NÓS
     const nodeSel = gNodes.selectAll('g.node').data(nodes, d => d.data.id);
     const nodeEnter = nodeSel.enter().append('g')
       .attr('class', d => `node ${d.data.type}`)
-      .attr('data-ext', d => ext(d.data.name))
       .attr('transform', d => `translate(${source.y0||0},${source.x0||0})`)
       .attr('opacity', 0)
       .on('click', (ev, d) => { ev.stopPropagation(); onNodeClick(ev, d); })
@@ -89,7 +87,7 @@
     nodeSel.exit().transition().duration(config.duration)
       .attr('transform', d => `translate(${source.y},${source.x})`).attr('opacity', 0).remove();
 
-    // Render Links
+    // RENDER LINKS
     const linkSel = gLinks.selectAll('path.link').data(links, d => d.target.data.id);
     const pathFn = config.lineStyle === 'curve' ? linkCurved : linkElbow;
     
@@ -121,12 +119,111 @@
     return iconMap[ext(data.name)] || iconMap['default'];
   }
 
-  // --- INTERAÇÃO ---
+  // --- 4. EXCEL EXPORT ---
+  function exportToExcel() {
+    if(!state.rootData) return;
+    
+    const rows = [];
+    // Função recursiva para "achatar" a árvore em lista de caminhos
+    function traverse(node, currentPath) {
+      const fullPath = currentPath ? `${currentPath}/${node.name}` : node.name;
+      rows.push({
+        "Caminho": fullPath,
+        "Tipo": node.type
+      });
+      // Verifica filhos carregados ou escondidos
+      const kids = node.children || node._children || node.lazyChildren || [];
+      kids.forEach(k => traverse(k, fullPath));
+    }
+
+    traverse(state.rootData, "");
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Mapa");
+    
+    // Nome do arquivo
+    const fileName = (state.rootData.name || "mapa") + ".xlsx";
+    XLSX.writeFile(workbook, fileName);
+    showToast("Planilha baixada!");
+  }
+
+  // --- 5. EXCEL IMPORT ---
+  function importFromExcel(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, {type: 'array'});
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const json = XLSX.utils.sheet_to_json(sheet);
+
+        if(!json.length) throw new Error("Planilha vazia");
+        
+        // Algoritmo: Reconstruir árvore a partir de caminhos
+        const rootName = "Raiz Importada";
+        const root = { name: rootName, type: 'directory', children: [] };
+        
+        // Mapa temporário para encontrar pais
+        const map = { "": root }; 
+
+        json.forEach(row => {
+          let path = row['Caminho'] || row['caminho'] || row['Path'];
+          const type = row['Tipo'] || row['tipo'] || row['Type'] || 'file';
+          
+          if(!path) return;
+          // Normaliza barras
+          path = path.replace(/\\/g, '/');
+          const parts = path.split('/');
+          
+          let currentPath = "";
+          let parent = root;
+
+          parts.forEach((part, index) => {
+            // Constrói caminho acumulativo para usar como chave
+            const isLast = index === parts.length - 1;
+            const parentPath = currentPath;
+            currentPath = currentPath ? `${currentPath}/${part}` : part;
+
+            // Se ainda não existe esse nó no mapa
+            if (!map[currentPath]) {
+              const newNode = {
+                name: part,
+                type: isLast ? type : 'directory', // Se é meio do caminho, é pasta
+                children: []
+              };
+              // Adiciona ao pai
+              parent.children = parent.children || [];
+              parent.children.push(newNode);
+              // Registra no mapa
+              map[currentPath] = newNode;
+            }
+            parent = map[currentPath];
+          });
+        });
+
+        // Se a raiz importada tiver só 1 filho que parece ser a raiz real, usa ele
+        let finalRoot = root;
+        if(root.children.length === 1) {
+            finalRoot = root.children[0];
+        }
+
+        initRoot(finalRoot);
+        showToast("Excel importado com sucesso!");
+
+      } catch(err) {
+        console.error(err);
+        alert("Erro ao ler Excel. Verifique se há colunas 'Caminho' e 'Tipo'.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  // --- INTERAÇÃO E DETALHES ---
   async function onNodeClick(ev, d) {
     hideContextMenu();
     state.selection = d.data.id;
-    
-    // ATUALIZAÇÃO DOS DETALHES NA BARRA LATERAL
     updateSidebar(d.data);
 
     if (d.data.type === 'directory') {
@@ -142,12 +239,10 @@
     }
   }
 
-  // Função Crítica: Preenche a barra lateral
   function updateSidebar(data) {
     const pathArr = getPath(data);
-    const fullPathStr = pathArr.map(n => n.name).join('/'); // Caminho relativo/virtual
+    const fullPathStr = pathArr.map(n => n.name).join('/');
     
-    // 1. Detalhes
     $('#details').innerHTML = `
       <div class="detail-item">
         <span class="detail-label">Nome</span>
@@ -158,27 +253,19 @@
         <span class="detail-value">${data.type === 'directory' ? 'Pasta' : 'Arquivo ' + ext(data.name).toUpperCase()}</span>
       </div>
       <div class="detail-item">
-        <span class="detail-label">Caminho (Clique para copiar)</span>
-        <div class="path-box" id="pathBox" title="Copiar caminho">${fullPathStr}</div>
+        <span class="detail-label">Caminho</span>
+        <div class="path-box" id="pathBox" title="Clique para copiar">${fullPathStr}</div>
       </div>
     `;
-
-    // Evento de Copiar
     $('#pathBox').onclick = () => {
-      navigator.clipboard.writeText(fullPathStr).then(() => showToast());
+      navigator.clipboard.writeText(fullPathStr).then(() => showToast("Caminho copiado!"));
     };
 
-    // 2. Navegação (Breadcrumbs)
     const bcHTML = pathArr.map((n, i) => {
       const isLast = i === pathArr.length - 1;
       return isLast ? `<span>${n.name}</span>` : `<a href="#">${n.name}</a>`;
     }).join(' <span style="color:#cbd5e1">/</span> ');
     $('#breadcrumbs').innerHTML = bcHTML;
-  }
-
-  function showToast() {
-    const t = $('#toast'); t.classList.add('show');
-    setTimeout(() => t.classList.remove('show'), 2000);
   }
 
   async function loadChildren(nodeData) {
@@ -207,7 +294,6 @@
     const root = d3.hierarchy(state.rootData, d=>d.children);
     treeLayout(root);
     const nodes = root.descendants();
-    
     if(nodes.length === 0) return;
 
     let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
@@ -216,9 +302,9 @@
       if(d.x < minY) minY = d.x; if(d.x > maxY) maxY = d.x;
     });
     const w = maxX - minX + 200; const h = maxY - minY + 100;
-    const scale = Math.min(180/w, 120/h);
+    const scale = Math.min(160/w, 100/h);
     const offsetX = (-minX * scale) + 10;
-    const offsetY = (-minY * scale) + (120 - h*scale)/2;
+    const offsetY = (-minY * scale) + (100 - h*scale)/2;
 
     const dots = miniSvg.selectAll('circle').data(nodes, d=>d.data.id);
     dots.enter().append('circle').attr('r', 2).attr('fill','#94a3b8')
@@ -238,7 +324,12 @@
     view.style.top = (((-t.y/t.k) - minY) * scale + offsetY) + 'px';
   }
 
-  // Helpers
+  function showToast(msg) {
+    const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2500);
+  }
+
+  // --- HELPERS ---
   function onContextMenu(e, d) {
     e.preventDefault(); state.contextNode = d;
     const m = $('#contextMenu');
@@ -251,12 +342,16 @@
   function ext(n){ const i=n.lastIndexOf('.'); return i>0?n.slice(i+1).toLowerCase():''; }
   function truncate(s, n){ return s.length>n? s.slice(0,n-1)+'…': s; }
 
-  // Botões
+  // --- CONTROLES ---
+  $('#btnExport').onclick = exportToExcel;
+  $('#btnImport').onclick = () => $('#fileInput').click();
+  $('#fileInput').onchange = (e) => { if(e.target.files[0]) importFromExcel(e.target.files[0]); };
+
   $('#ctxExpand').onclick = async () => { if(state.contextNode) { await loadChildren(state.contextNode.data); update(state.contextNode); }};
   $('#ctxCollapse').onclick = () => { if(state.contextNode && state.contextNode.data.children) { state.contextNode.data._children = state.contextNode.data.children; state.contextNode.data.children = null; update(state.contextNode); }};
   $('#ctxCopy').onclick = () => {
     const p = getPath(state.contextNode.data).map(n=>n.name).join('/');
-    navigator.clipboard.writeText(p).then(showToast);
+    navigator.clipboard.writeText(p).then(()=>showToast("Caminho copiado!"));
   };
   
   $('#btnToggleLines').onclick = () => {
@@ -266,17 +361,11 @@
   };
   $('#btnFit').onclick = () => {
     if(!state.rootData) return;
-    graph.transition().duration(750).call(zoom.transform, d3.zoomIdentity.translate(40, $('#graph').clientHeight/2).scale(1));
+    const h = $('#graph').clientHeight;
+    graph.transition().duration(750).call(zoom.transform, d3.zoomIdentity.translate(40, h/2).scale(1));
   };
   $('#btnPick').onclick = async () => {
     try { const h = await showDirectoryPicker(); initRoot({name:h.name, handle:h}); } catch(e){}
-  };
-  $('#btnImport').onclick = () => $('#fileJson').click();
-  $('#fileJson').onchange = (e) => { const f=e.target.files[0]; if(f){const r=new FileReader(); r.onload=()=>initRoot(JSON.parse(r.result)); r.readAsText(f);} };
-  $('#btnExport').onclick = () => {
-    const s=(n)=>({name:n.name, type:n.type, children:(n.children||n._children||[]).map(s)});
-    const a = document.createElement('a'); a.href=URL.createObjectURL(new Blob([JSON.stringify(s(state.rootData))],{type:'application/json'}));
-    a.download='mapa.json'; a.click();
   };
   $('#txtSearch').oninput = (e) => {
     const v = e.target.value.toLowerCase();
@@ -290,18 +379,18 @@
     state.rootData = createNode(data.name, 'directory', null, {lazyChildren:data.children});
     if(data.handle) state.handles.set(state.rootData.id, data.handle);
     update({x0:0, y0:0});
-    // Selecionar raiz para preencher sidebar
-    onNodeClick(null, {data: state.rootData});
     $('#btnFit').click();
   }
   
   // Demo Inicial
   initRoot({
-    name: 'Projeto Demo',
+    name: 'Projeto Excel',
     children: [
-      { name: 'src', type:'directory', children: [{name:'App.js', type:'file'}, {name:'index.css', type:'file'}]},
-      { name: 'public', type:'directory', children: [{name:'index.html', type:'file'}]},
-      { name: 'README.md', type:'file'}
+      { name: 'dados', type:'directory', children: [
+        {name:'vendas.xlsx', type:'file'}, {name:'clientes.csv', type:'file'}
+      ]},
+      { name: 'relatorios', type:'directory', children: [{name:'anual.pdf', type:'file'}]},
+      { name: 'lista_importacao.xlsx', type:'file'}
     ]
   });
 })();
