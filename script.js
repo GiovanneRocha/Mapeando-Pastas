@@ -1,314 +1,253 @@
-/* Mapa de Pastas — Fluxo Interativo */
+/* Mapa de Pastas — Árvore Hierárquica (Tree Layout) */
 (function(){
   const $ = (sel, el=document)=> el.querySelector(sel);
-  const $$ = (sel, el=document)=> el.querySelectorAll(sel);
+
+  // Configurações visuais
+  const config = {
+    nodeWidth: 180,
+    nodeHeight: 40,
+    levelSpacing: 220, 
+    nodeSpacing: 50,   
+    duration: 500      
+  };
 
   const graph = d3.select('#graph');
   const zoomLayer = d3.select('#zoomLayer');
   const gLinks = d3.select('.links');
   const gNodes = d3.select('.nodes');
 
+  // Estado da aplicação
   const state = {
-    nodes: [],
-    links: [],
-    byId: new Map(),
-    id: 0,
-    selection: null,
-    handles: new Map(), // id -> FileSystemHandle (não serializa)
-    rootId: null
+    rootData: null,      
+    handles: new Map(),  
+    lastId: 0,
+    selection: null
   };
 
-  const sim = d3.forceSimulation()
-    .force('link', d3.forceLink().id(d=>d.id).distance(80).strength(0.6))
-    .force('charge', d3.forceManyBody().strength(-260))
-    .force('center', d3.forceCenter())
-    .force('collide', d3.forceCollide().radius(d=>d.r||34).iterations(2));
+  const treeLayout = d3.tree().nodeSize([config.nodeSpacing, config.levelSpacing]);
 
-  const zoom = d3.zoom().scaleExtent([0.2, 2.5]).on('zoom', (ev)=>{
-    zoomLayer.attr('transform', ev.transform);
-  });
-  graph.call(zoom);
+  // --- CORREÇÃO DE MOVIMENTAÇÃO (ZOOM/PAN) ---
+  const zoom = d3.zoom()
+    .scaleExtent([0.1, 4]) // Permite afastar bem e aproximar bem
+    .on('zoom', (ev) => {
+      zoomLayer.attr('transform', ev.transform);
+    });
 
-  function newId(){ state.id+=1; return state.id; }
+  // Aplica o zoom ao elemento SVG inteiro
+  // Adiciona um retângulo transparente no fundo para garantir captura do clique
+  graph.insert("rect", ":first-child")
+    .attr("width", "100%")
+    .attr("height", "100%")
+    .attr("fill", "transparent")
+    .style("pointer-events", "all"); // Garante que o fundo pegue o arraste
 
-  function makeNode({name, type, parentId=null, meta={}}){
-    const n = {
-      id: newId(),
-      name, type, parentId,
-      expanded: false,
-      fx: undefined, fy: undefined,
-      x: (Math.random()*200-100), y: (Math.random()*200-100),
-      r: type==='directory'? 42: 34,
-      ...meta
+  graph.call(zoom).on("dblclick.zoom", null); // Desativa zoom duplo clique se quiser
+
+  // --- FIM DA CORREÇÃO ---
+
+  function createNode(name, type, parent = null, meta = {}) {
+    state.lastId++;
+    return {
+      id: state.lastId,
+      name: name, type: type,
+      children: null, _children: null, dataChildren: [],
+      parent: parent, ...meta
     };
-    state.nodes.push(n);
-    state.byId.set(n.id, n);
-    if(parentId){ state.links.push({source: parentId, target: n.id}); }
-    return n;
   }
 
-  function setRoot(node){ state.rootId = node.id; }
+  function update(source) {
+    if (!state.rootData) return;
 
-  function childrenOf(id){ return state.nodes.filter(n=>n.parentId===id); }
+    const root = d3.hierarchy(state.rootData, d => d.children);
+    treeLayout(root);
 
-  function pathToRoot(id){
-    const p=[]; let cur = state.byId.get(id);
-    while(cur){ p.push(cur); cur = cur.parentId? state.byId.get(cur.parentId): null; }
-    return p.reverse();
-  }
+    const nodes = root.descendants();
+    const links = root.links();
 
-  function render(){
-    // LINKS
-    const linkSel = gLinks.selectAll('path.link').data(state.links, d=>d.source.id+"->"+d.target.id);
-    linkSel.exit().remove();
-    linkSel.enter().append('path').attr('class','link');
+    nodes.forEach(d => { d.y = d.depth * config.levelSpacing; });
 
-    // NODES
-    const nodeSel = gNodes.selectAll('g.node').data(state.nodes, d=>d.id);
-    nodeSel.exit().remove();
+    // --- NÓS ---
+    const nodeSel = gNodes.selectAll('g.node').data(nodes, d => d.data.id);
 
     const nodeEnter = nodeSel.enter().append('g')
-      .attr('class', d=>`node ${d.type}`)
-      .call(d3.drag()
-        .on('start', dragstarted)
-        .on('drag', dragged)
-        .on('end', dragended))
-      .on('click', (ev,d)=> onNodeClick(ev,d));
+      .attr('class', d => `node ${d.data.type}`)
+      .attr('transform', d => `translate(${source.y0 || 0},${source.x0 || 0})`)
+      .attr('opacity', 0)
+      .on('click', (ev, d) => {
+        ev.stopPropagation(); // Importante: Clicar no nó não deve disparar arraste imediato bugado
+        onNodeClick(ev, d);
+      });
 
-    nodeEnter.append('rect').attr('width', 180).attr('height', 50).attr('x', -90).attr('y', -25);
+    nodeEnter.append('rect')
+      .attr('width', config.nodeWidth).attr('height', config.nodeHeight)
+      .attr('x', 0).attr('y', -config.nodeHeight / 2);
 
-    // Icone simples
-    nodeEnter.append('circle').attr('cx', -68).attr('cy', 0).attr('r', 12)
-      .attr('fill', d=> d.type==='directory' ? '#cfe3f2' : '#eaf0f6').attr('stroke', '#bcd2e4');
+    nodeEnter.append('circle').attr('cx', 20).attr('cy', 0).attr('r', 10);
     nodeEnter.append('path')
-      .attr('d', d=> d.type==='directory' ? 'M-75,-4 h10 l3,4 h12 v12 h-25 z' : 'M-76,-8 h16 l6,6 v16 h-22 z')
-      .attr('fill', d=> d.type==='directory' ? '#4a83b6' : '#7b8b9c');
+      .attr('transform', 'translate(12, -8) scale(0.8)')
+      .attr('d', d => d.data.type === 'directory' ? 'M2 4h4l2 2h8v10H2z' : 'M4 2h8l4 4v12H4z');
 
-    nodeEnter.append('text').attr('class','label').attr('x', -48).attr('y', 2).text(d=>truncate(d.name, 22));
+    nodeEnter.append('text').attr('class', 'label')
+      .attr('x', 38).attr('y', 4).text(d => truncate(d.data.name, 20));
+    
+    nodeEnter.append('text').attr('class', 'badge')
+      .attr('x', config.nodeWidth - 10).attr('y', 12)
+      .attr('text-anchor', 'end').text(d => d.data.type === 'directory' ? '' : ext(d.data.name));
 
-    nodeEnter.append('text').attr('class','badge').attr('x', 78).attr('y', 18)
-      .text(d=> d.type==='directory' ? 'pasta' : ext(d.name));
+    const nodeUpdate = nodeEnter.merge(nodeSel);
+    nodeUpdate.transition().duration(config.duration)
+      .attr('transform', d => `translate(${d.y},${d.x})`).attr('opacity', 1);
+    
+    nodeUpdate.classed('selected', d => d.data.id === state.selection);
 
-    const merged = nodeEnter.merge(nodeSel);
+    nodeSel.exit().transition().duration(config.duration)
+      .attr('transform', d => `translate(${source.y},${source.x})`).attr('opacity', 0).remove();
 
-    sim.nodes(state.nodes).on('tick', ()=>{
-      gLinks.selectAll('path.link')
-        .attr('d', d=> `M ${d.source.x} ${d.source.y} L ${d.target.x} ${d.target.y}`);
-      gNodes.selectAll('g.node')
-        .attr('transform', d=> `translate(${d.x},${d.y})`);
-    });
-    sim.force('link').links(state.links);
-    sim.alpha(0.9).restart();
+    // --- LINKS ---
+    const linkSel = gLinks.selectAll('path.link').data(links, d => d.target.data.id);
+    const diagonal = d3.linkHorizontal().x(d => d.y).y(d => d.x);
+
+    const linkEnter = linkSel.enter().append('path')
+      .attr('class', 'link')
+      .attr('d', d => {
+        const o = { x: source.x0 || source.x, y: source.y0 || source.y };
+        return diagonal({ source: o, target: o });
+      });
+
+    linkSel.merge(linkEnter).transition().duration(config.duration).attr('d', diagonal);
+
+    linkSel.exit().transition().duration(config.duration)
+      .attr('d', d => {
+        const o = { x: source.x, y: source.y };
+        return diagonal({ source: o, target: o });
+      }).remove();
+
+    nodes.forEach(d => { d.data.x0 = d.x; d.data.y0 = d.y; });
   }
 
-  function dragstarted(event, d){
-    if(!event.active) sim.alphaTarget(0.3).restart();
-    d.fx = d.x; d.fy = d.y;
+  async function onNodeClick(event, d) {
+    state.selection = d.data.id;
+    updateDetails(d);
+    
+    if (d.data.type === 'directory') {
+      if (d.children) {
+        d.data._children = d.data.children;
+        d.data.children = null;
+      } else {
+        if (d.data._children) {
+          d.data.children = d.data._children;
+          d.data._children = null;
+        } else {
+          await loadChildren(d.data);
+        }
+      }
+      update(d);
+    } else {
+      update(d);
+    }
   }
-  function dragged(event, d){ d.fx = event.x; d.fy = event.y; }
-  function dragended(event, d){ if(!event.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }
+
+  async function loadChildren(nodeData) {
+    let children = [];
+    if (nodeData.lazyChildren) {
+      children = nodeData.lazyChildren.map(c => 
+        createNode(c.name, c.type, nodeData, { lazyChildren: c.children })
+      );
+      nodeData.lazyChildren = null;
+    } else if (state.handles.has(nodeData.id)) {
+      const dirHandle = state.handles.get(nodeData.id);
+      try {
+        for await (const [name, handle] of dirHandle.entries()) {
+          if (name.startsWith('.')) continue;
+          const type = handle.kind === 'directory' ? 'directory' : 'file';
+          const child = createNode(name, type, nodeData);
+          if (type === 'directory') state.handles.set(child.id, handle);
+          children.push(child);
+        }
+        children.sort((a,b) => (a.type === b.type ? 0 : a.type==='directory'?-1:1) || a.name.localeCompare(b.name));
+      } catch(e) { console.error(e); }
+    }
+    nodeData.children = children.length > 0 ? children : [];
+  }
 
   function truncate(s, n){ return s.length>n? s.slice(0,n-1)+'…': s; }
-  function ext(name){ const i=name.lastIndexOf('.'); return i>0? name.slice(i+1).toLowerCase(): 'arquivo'; }
+  function ext(name){ const i=name.lastIndexOf('.'); return i>0? name.slice(i+1).toLowerCase(): ''; }
 
-  function onNodeClick(ev, d){
-    selectNode(d.id);
-    if(d.type==='directory') toggleExpand(d);
-  }
-
-  function selectNode(id){
-    state.selection = id;
-    gNodes.selectAll('g.node').classed('selected', d=> d.id===id);
-    // Breadcrumbs
-    const bc = pathToRoot(id);
-    const nav = bc.map((n,i)=> `<a href="#" data-id="${n.id}">${n.name}</a>${i<bc.length-1?' / ':''}`).join('');
-    $('#breadcrumbs').innerHTML = nav || '–';
-    $('#breadcrumbs').querySelectorAll('a').forEach(a=>{
-      a.addEventListener('click', (e)=>{ e.preventDefault(); const nid=+a.dataset.id; centerOnNode(nid); selectNode(nid); });
-    });
-    // Details
-    const node = state.byId.get(id);
-    const kids = childrenOf(id).length;
+  function updateDetails(d3Node) {
+    const d = d3Node.data;
+    const path = getPath(d).map(n=>n.name).join('/');
+    const crumbs = getPath(d).map(n => `<a href="#" onclick="return false;">${n.name}</a>`).join(' / ');
+    $('#breadcrumbs').innerHTML = crumbs || 'Raiz';
     $('#details').innerHTML = `
-      <div><b>Nome:</b> ${node.name}</div>
-      <div><b>Tipo:</b> ${node.type==='directory'?'Pasta':'Arquivo'}</div>
-      <div><b>Caminho:</b> ${node.path||'—'}</div>
-      <div><b>Filhos:</b> ${kids}</div>
+      <div style="margin-bottom:8px"><b>${d.name}</b></div>
+      <div style="font-size:12px; color:#666">
+        <div>Tipo: ${d.type === 'directory' ? 'Pasta' : 'Arquivo ' + ext(d.name).toUpperCase()}</div>
+        <div>Caminho: ${path}</div>
+      </div>
     `;
   }
 
-  function centerOnNode(id){
-    const n = state.byId.get(id); if(!n) return;
-    const {width,height} = graph.node().getBoundingClientRect();
-    const t = d3.zoomTransform(graph.node());
-    const scale = t.k;
-    const x = width/2 - n.x*scale; const y = height/2 - n.y*scale;
-    graph.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(x,y).scale(scale));
+  function getPath(nodeData) {
+    const path = []; let cur = nodeData;
+    while(cur) { path.push(cur); cur = cur.parent; }
+    return path.reverse();
   }
 
-  async function toggleExpand(node){
-    if(node.expanded){
-      // Colapsar: remover subárvore
-      collapse(node.id);
-      node.expanded=false;
-      render();
-      return;
-    }
-    // Expandir
-    if(node.lazyChildren){
-      node.lazyChildren.forEach(c=> addChild(node, c));
-      node.lazyChildren = null;
-    } else if(node.fsKind==='directory' && state.handles.has(node.id)){
-      const dirHandle = state.handles.get(node.id);
-      for await (const [name, handle] of dirHandle.entries()){
-        if (name.startsWith('.')) continue; // ignora ocultos
-        if(handle.kind === 'directory'){
-          const child = makeNode({name, type:'directory', parentId: node.id, meta:{ path: (node.path? node.path+"/":"")+name, fsKind:'directory' }});
-          state.handles.set(child.id, handle);
-        } else {
-          makeNode({name, type:'file', parentId: node.id, meta:{ path: (node.path? node.path+"/":"")+name, fsKind:'file' }});
-        }
-      }
-    }
-    node.expanded = true;
-    render();
+  function initRoot(dataObj) {
+    state.lastId = 0; state.handles = new Map(); state.selection = null;
+    gNodes.selectAll('*').remove(); gLinks.selectAll('*').remove();
+    
+    state.rootData = createNode(dataObj.name || 'Raiz', 'directory', null, { lazyChildren: dataObj.children });
+    if (dataObj.handle) state.handles.set(state.rootData.id, dataObj.handle);
+
+    onNodeClick(null, { data: state.rootData });
+    
+    // Centralizar inicialmente
+    setTimeout(()=> $('#btnFit').click(), 100);
   }
 
-  function addChild(parent, childDesc){
-    const child = makeNode({
-      name: childDesc.name,
-      type: childDesc.type,
-      parentId: parent.id,
-      meta: { path: (parent.path? parent.path+"/":"") + childDesc.name, fsKind: childDesc.type==='directory'?'directory':'file' }
-    });
-    if(childDesc.type==='directory' && childDesc.children && childDesc.children.length){
-      // lazy: só liga como lazyChildren do filho para expandir depois
-      child.lazyChildren = childDesc.children;
-    }
-    return child;
-  }
-
-  function collapse(id){
-    const toRemove = new Set();
-    (function walk(nid){
-      const kids = childrenOf(nid);
-      kids.forEach(k=>{ toRemove.add(k.id); walk(k.id); });
-    })(id);
-    // remove links
-    state.links = state.links.filter(l=> !toRemove.has(l.target.id));
-    // remove nodes
-    state.nodes = state.nodes.filter(n=> !toRemove.has(n.id));
-    [...toRemove].forEach(i=> state.byId.delete(i));
-  }
-
-  async function pickDirectory(){
-    if(!('showDirectoryPicker' in window)){
-      alert('Seu navegador não suporta o Acesso ao Sistema de Arquivos. Use Chrome/Edge ou importe um JSON.');
-      return;
-    }
-    try{
-      const dir = await window.showDirectoryPicker();
-      // Reset
-      Object.assign(state, {nodes:[],links:[],byId:new Map(),handles:new Map(),id:0,selection:null, rootId:null});
-      const root = makeNode({name: dir.name || 'Raiz', type:'directory', parentId:null, meta:{path: dir.name || '/', fsKind:'directory'}});
-      setRoot(root);
-      state.handles.set(root.id, dir);
-      render();
-      // auto expandir primeiro nível
-      await toggleExpand(root);
-      selectNode(root.id);
-    }catch(err){ if(err && err.name!=='AbortError'){ console.error(err); alert('Não foi possível acessar a pasta.'); }}
-  }
-
-  function importJSON(obj){
-    // Reset
-    Object.assign(state, {nodes:[],links:[],byId:new Map(),handles:new Map(),id:0,selection:null, rootId:null});
-    const root = makeNode({name: obj.name||'Raiz', type:'directory', parentId:null, meta:{path: obj.name||'/'}});
-    setRoot(root);
-    root.lazyChildren = obj.children||[];
-    render();
-    toggleExpand(root);
-    selectNode(root.id);
-  }
-
-  function exportJSON(){
-    function build(nid){
-      const n = state.byId.get(nid);
-      const kids = childrenOf(nid).map(k=> build(k.id));
-      return { name: n.name, type: n.type, children: kids };
-    }
-    const data = build(state.rootId);
-    const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = (state.byId.get(state.rootId)?.name||'mapa')+".json";
-    a.click(); URL.revokeObjectURL(a.href);
-  }
-
-  function saveSVG(){
-    const svg = document.getElementById('graph');
-    const serializer = new XMLSerializer();
-    // Inline estilos mínimos
-    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    const source = serializer.serializeToString(svg);
-    const blob = new Blob([source], {type:'image/svg+xml;charset=utf-8'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'mapa-pastas.svg'; a.click();
-    URL.revokeObjectURL(a.href);
-  }
-
-  function savePNG(){
-    const svg = document.getElementById('graph');
-    const serializer = new XMLSerializer();
-    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    const source = serializer.serializeToString(svg);
-    const img = new Image();
-    const svg64 = btoa(unescape(encodeURIComponent(source)));
-    img.onload = function(){
-      const canvas = document.createElement('canvas');
-      canvas.width = svg.clientWidth; canvas.height = svg.clientHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = getComputedStyle(document.body).backgroundColor || '#fff';
-      ctx.fillRect(0,0,canvas.width,canvas.height);
-      ctx.drawImage(img, 0, 0);
-      const a = document.createElement('a');
-      a.href = canvas.toDataURL('image/png'); a.download='mapa-pastas.png'; a.click();
-    };
-    img.src = 'data:image/svg+xml;base64,' + svg64;
-  }
-
-  function applySearch(q){
-    q = (q||'').trim().toLowerCase();
-    const nodes = gNodes.selectAll('g.node');
-    if(!q){ nodes.classed('dimmed', false); return; }
-    nodes.classed('dimmed', d=> !d.name.toLowerCase().includes(q));
-  }
-
-  // Controles UI
-  $('#btnPick').addEventListener('click', pickDirectory);
-  $('#btnImport').addEventListener('click', ()=> $('#fileJson').click());
-  $('#fileJson').addEventListener('change', (ev)=>{
-    const f = ev.target.files?.[0]; if(!f) return;
-    const reader = new FileReader();
-    reader.onload = ()=>{ try { const obj = JSON.parse(reader.result); importJSON(obj); } catch(e){ alert('JSON inválido.'); } };
-    reader.readAsText(f);
-  });
-  $('#btnExport').addEventListener('click', exportJSON);
-  $('#btnSaveSVG').addEventListener('click', saveSVG);
-  $('#btnSavePNG').addEventListener('click', savePNG);
-  $('#txtSearch').addEventListener('input', (e)=> applySearch(e.target.value));
-  window.addEventListener('keydown', (e)=>{ if(e.ctrlKey && e.key.toLowerCase()==='k'){ e.preventDefault(); $('#txtSearch').focus(); } });
-
-  // Inicialização com exemplo
-  const exemplo = {
-    name: 'Projeto',
-    type: 'directory',
-    children: [
-      { name: 'docs', type:'directory', children:[ {name:'README.md', type:'file'}, {name:'arquitetura.drawio', type:'file'} ] },
-      { name: 'src', type:'directory', children:[ {name:'index.js', type:'file'}, {name:'app', type:'directory', children:[{name:'App.jsx', type:'file'},{name:'App.css', type:'file'}]} ] },
-      { name: 'package.json', type:'file' },
-      { name: 'LICENSE', type:'file' }
-    ]
+  $('#btnPick').onclick = async () => {
+    if(!window.showDirectoryPicker) return alert('Navegador não suportado.');
+    try { const handle = await showDirectoryPicker(); initRoot({ name: handle.name, handle: handle }); } catch(e) {}
   };
-  importJSON(exemplo);
+  $('#btnImport').onclick = () => $('#fileJson').click();
+  $('#fileJson').onchange = (e) => {
+    const f = e.target.files[0]; if(f) { const r = new FileReader(); r.onload = () => initRoot(JSON.parse(r.result)); r.readAsText(f); }
+  };
+  $('#btnExport').onclick = () => {
+    const serialize = (n) => ({ name: n.name, type: n.type, children: (n.children || n._children || []).map(serialize) });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(serialize(state.rootData),null,2)],{type:'application/json'}));
+    a.download = 'mapa.json'; a.click();
+  };
+  
+  // Função de Centralizar melhorada para garantir o reset da posição
+  $('#btnFit').onclick = () => {
+    if(!state.rootData) return;
+    const {width, height} = graph.node().getBoundingClientRect();
+    // Move para x=40 (margem esquerda) e centraliza verticalmente
+    graph.transition().duration(750)
+      .call(zoom.transform, d3.zoomIdentity.translate(40, height/2).scale(1));
+  };
 
+  $('#btnSaveSVG').onclick = () => {
+    const svgData = new XMLSerializer().serializeToString(document.getElementById('graph'));
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([svgData], {type:'image/svg+xml;charset=utf-8'}));
+    a.download = 'mapa.svg'; a.click();
+  };
+  $('#txtSearch').oninput = (e) => {
+    const term = e.target.value.toLowerCase();
+    gNodes.selectAll('.node').classed('dimmed', d => term && !d.data.name.toLowerCase().includes(term));
+  };
+  window.onkeydown = (e) => { if(e.ctrlKey && e.key === 'k') { e.preventDefault(); $('#txtSearch').focus(); }};
+
+  initRoot({
+    name: 'Projeto Modelo',
+    children: [
+      { name: 'src', type: 'directory', children: [
+          { name: 'index.js', type: 'file' },
+          { name: 'styles', type: 'directory', children: [{name:'main.css', type:'file'}] }
+      ]},
+      { name: 'package.json', type: 'file' }
+    ]
+  });
 })();
