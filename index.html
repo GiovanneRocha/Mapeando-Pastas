@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Mapa de Pastas - Excel Edition</title>
+  <title>Mapa de Pastas - Layout Edition</title>
   <link rel="stylesheet" href="styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
@@ -12,8 +12,8 @@
 <body>
   <header class="app-header">
     <div class="logo">
-      <span class="material-symbols-rounded">table_view</span>
-      <span>Mapa Excel</span>
+      <span class="material-symbols-rounded">account_tree</span>
+      <span>Mapa Pro</span>
     </div>
     <div class="toolbar">
       <button id="btnPick" class="primary" title="Ler pasta do PC">
@@ -23,24 +23,39 @@
       <input id="fileInput" type="file" accept=".xlsx, .xls, .csv" hidden />
       
       <button id="btnImport" title="Importar Excel (.xlsx)">
-        <span class="material-symbols-rounded">upload_file</span> Importar Excel
+        <span class="material-symbols-rounded">upload_file</span>
       </button>
       <button id="btnExport" title="Baixar Excel (.xlsx)">
-        <span class="material-symbols-rounded">download</span> Exportar Excel
+        <span class="material-symbols-rounded">download</span>
       </button>
       
       <div class="separator"></div>
+
+      <div class="layout-selector">
+        <button class="layout-btn active" data-mode="horizontal" title="Horizontal">
+          <span class="material-symbols-rounded">align_horizontal_left</span>
+        </button>
+        <button class="layout-btn" data-mode="vertical" title="Vertical">
+          <span class="material-symbols-rounded">align_vertical_top</span>
+        </button>
+        <button class="layout-btn" data-mode="radial" title="Radial (Circular)">
+          <span class="material-symbols-rounded">hub</span>
+        </button>
+      </div>
       
-      <button id="btnToggleLines" title="Alternar Linhas">
-        <span class="material-symbols-rounded">show_chart</span> <span id="lblLines">Curvas</span>
+      <div class="separator"></div>
+      
+      <button id="btnDupe" title="Achar duplicados">
+        <span class="material-symbols-rounded">content_copy</span>
       </button>
-      <button id="btnFit" title="Centralizar">
+      <button id="btnFit" title="Resetar Zoom">
         <span class="material-symbols-rounded">center_focus_strong</span>
       </button>
       
       <div class="search-wrap">
         <span class="material-symbols-rounded search-icon">search</span>
-        <input id="txtSearch" type="search" placeholder="Buscar... (Ctrl+K)" />
+        <input id="txtSearch" type="search" placeholder="Buscar... (Ctrl+K)" autocomplete="off" />
+        <div id="searchResults" class="search-results"></div>
       </div>
     </div>
   </header>
@@ -60,13 +75,14 @@
       </section>
 
       <section class="panel">
-        <h2><span class="material-symbols-rounded">help</span> Excel & Comandos</h2>
-        <ul class="help-list">
-          <li><b>Importar:</b> O Excel deve ter colunas "Caminho" e "Tipo" (opcional).</li>
-          <li><b>Exportar:</b> Gera um .xlsx com toda a estrutura atual.</li>
-          <li><b>Clique:</b> Expande pastas.</li>
-          <li><b>Botão Direito:</b> Menu extra.</li>
-        </ul>
+        <h2><span class="material-symbols-rounded">palette</span> Legenda</h2>
+        <div class="legend-grid">
+            <div class="legend-item"><span style="color:#10b981">●</span> Excel/Dados</div>
+            <div class="legend-item"><span style="color:#ef4444">●</span> PDF</div>
+            <div class="legend-item"><span style="color:#3b82f6">●</span> Doc/Texto</div>
+            <div class="legend-item"><span style="color:#8b5cf6">●</span> Mídia</div>
+            <div class="legend-item"><span style="color:#f59e0b">●</span> Código</div>
+        </div>
       </section>
     </aside>
 
@@ -83,14 +99,21 @@
         </g>
       </svg>
       
-      <div id="minimap" class="minimap">
-        <svg id="miniSvg"></svg>
-        <div id="miniViewport"></div>
-      </div>
+      <div id="tooltip" class="tooltip"></div>
       
       <div id="toast" class="toast">Ação concluída!</div>
     </section>
   </main>
+
+  <div id="dialogOverlay" class="dialog-overlay">
+    <div class="dialog">
+      <div class="dialog-header">
+        <h3>Arquivos Duplicados</h3>
+        <button id="btnCloseDialog" class="icon-btn"><span class="material-symbols-rounded">close</span></button>
+      </div>
+      <div id="dupeList" class="dialog-body"></div>
+    </div>
+  </div>
 
   <div id="contextMenu" class="context-menu">
     <div class="menu-item" id="ctxExpand"><span class="material-symbols-rounded">expand</span> Expandir</div>
